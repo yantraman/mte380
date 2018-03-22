@@ -1,14 +1,16 @@
 import pygame
 from Adafruit_PCA9685 import PCA9685
-from time import sleep
+from time import sleep, time
 from math import sqrt
 from smbus import SMBus
 from Adafruit_BNO055 import BNO055
+from pid_controller.pid import PID
 
-LD = 7
-RD = 15
-LF = 11
-RF = 3
+LD = 11
+RD = 3
+LF = 7
+RF = 15
+calibration  = [223, 255, 249, 255, 219, 255, 66, 253, 142, 255, 49, 251, 254, 255, 253, 255, 0, 0, 232, 3, 151, 2]
     
 class PWM(object):
 
@@ -26,6 +28,10 @@ class PWM(object):
     
     def set_speed(self, code, speed):
         speed += self.__ARM
+        if speed > 350:
+            speed = 350
+        elif speed < 150:
+            speed = 150
         self.__pwm.set_pwm(code, 0, speed)
         sleep(1.0/48)
 
@@ -36,7 +42,7 @@ class PressureSensor(object):
     __ADDR = 0x76
 
     def __init__(self):
-        self.__bus.write_byte(self.__ADDR)
+        self.__bus.write_byte(self.__ADDR, 0X1E)
         sleep(self.__delay)
     
     def calibrate(self):
@@ -108,8 +114,9 @@ class PressureSensor(object):
     def get_depth(self):
         rho = 997.0
         g = 9.81
-        abs_pressure = 968.0
-        return (self.get_pressure() - abs_pressure)/(rho*g)
+        abs_pressure = 970
+        return (self.get_pressure() - abs_pressure)*100/(rho*g)
+
 
 class IMU(object):
 
@@ -117,37 +124,24 @@ class IMU(object):
         self.__bno = BNO055.BNO055(serial_port='/dev/ttyAMA0', rst=18)
         if not self.__bno.begin():
             raise RuntimeError('Failed to initialize BNO055! Is the sensor connected?')
+        self.__bno.set_calibration(calibration)
 
-    def get_required(self):
+    def get_required(self, ref_heading):
         roll_bias = 7.5
         heading, roll, _ = self.__bno.read_euler()
-        if heading > 180:
-            heading -= 360
+        _, accy, _ = self.__bno.read_linear_acceleration()
+        if heading > (180 + ref_heading):
+            heading = heading - 360
         
         roll -= roll_bias
         if roll > 180:
             roll -= 360
-        return heading, roll
-
-class MotorPID(object):
-    def __init__(self, Kp, Ki, Kd):
-        self.kp = Kp
-        self.ki = Ki
-        self.kd = Kd
-
-        self.__integral = 0
-        self.__prev_err = 0
-
-    def get_speed(self, ref, act):
-        error = ref, act
-        self.__integral = integral + err*0.02
-        derivative = (err - self.__prev_err) / 0.02
-        return self.kp*err + self.ki*self.__integral + self.kd*derivative
+        return heading, roll, accy
 
 if __name__ == '__main__':
     # initialize joystick
-    j = pygame.joystick.Joystick(0)
-    j.init()
+    #j = pygame.joystick.Joystick(0)
+    # j.init()
 
     # initialize PWM board
     pwm = PWM()
@@ -161,12 +155,45 @@ if __name__ == '__main__':
     # calibrate Pressure Sensor
     pressure.calibrate()
 
+    imu = IMU()
+    sleep(1)
+
+    depthPID = PID(p=145, i=0.1, d=1)
+    depthPID.target = 0.9
+
+    headingPID = PID(p=0.75, i=0.01, d=0)
+    init_heading, _, _ = imu.get_required(0)
+    headingPID.target = init_heading - 15
+    count = 0
+    start = time()
     while True:
         try:
-            
+            depth = pressure.get_depth()
+            heading, roll, accy = imu.get_required(ref_heading=headingPID.target)
+            depthCorrection = -int(depthPID(feedback=depth))
+            headingCorrection = -int(headingPID(feedback=heading))
+            if depth > 0.1:
+                pwm.set_speed(LD, depthCorrection)
+                pwm.set_speed(RD, depthCorrection)
+                pwm.set_speed(LF, headingCorrection + 30)
+                pwm.set_speed(RF, headingCorrection - 30)
+            end = time() - start
+            if end > 8.0 and end <= 24.0:
+                if depthPID.target == 0.9:
+                    depthPID.target = 0.3
+                    print 'Obstacle 1 done'
+            elif end > 24.0:
+                pwm.arm()
+                print 'Obstacle 2 done'
+                break
+        except KeyboardInterrupt:
+            pwm.arm()
+            print ("Motor stopped")
+            break
         except IOError:
-            delay(0.2)
-        continue
+            print ("Oh shit! Remote IO Error")
+            sleep(0.2)
+            continue
 
 
 
