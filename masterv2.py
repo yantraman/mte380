@@ -122,10 +122,9 @@ class IMU(object):
 
     def __init__(self):
         self.__bno = BNO055.BNO055(serial_port='/dev/ttyAMA0', rst=18)
-        calibration  = [223, 255, 249, 255, 219, 255, 66, 253, 142, 255, 49, 251, 254, 255, 253, 255, 0, 0, 232, 3, 151, 2]
         if not self.__bno.begin():
             raise RuntimeError('Failed to initialize BNO055! Is the sensor connected?')
-        #self.__bno.set_calibration(calibration)
+        self.__bno.set_calibration(calibration)
 
     def get_required(self, ref_heading):
         roll_bias = 7.5
@@ -139,10 +138,23 @@ class IMU(object):
             roll -= 360
         return heading, roll, accy
 
+class Controller(object):
+    def __init__(self):
+        pygame.joystick.init()
+        self.__lastTime = 0
+        self.__lastActive = 0
+
+    def connected(self):
+        now = time()
+        if now - self.__lastActive > 5 and now - self.__lastTime > 1:
+            self.__lastTime = 0
+            pygame.joystick.quit()
+            pygame.joystick.init()
+        return pygame.joystick.get_count() > 0
+    
 if __name__ == '__main__':
     # initialize joystick
-    #j = pygame.joystick.Joystick(0)
-    # j.init()
+    controller = Controller()
 
     # initialize PWM board
     pwm = PWM()
@@ -159,34 +171,78 @@ if __name__ == '__main__':
     imu = IMU()
     sleep(1)
 
-    depthPID = PID(p=145, i=0.2, d=1)
+    depthPID = PID(p=145, i=0.1, d=1)
     depthPID.target = 0.9
 
-    headingPID = PID(p=0.75, i=0.02, d=0.05)
+    headingPID = PID(p=0.75, i=0.01, d=0)
     init_heading, _, _ = imu.get_required(0)
     headingPID.target = init_heading - 15
     count = 0
     start = time()
     while True:
         try:
-            depth = pressure.get_depth()
-            heading, roll, accy = imu.get_required(ref_heading=headingPID.target)
-            depthCorrection = -int(depthPID(feedback=depth))
-            headingCorrection = -int(headingPID(feedback=heading))
-            if depth > 0.1:
-                pwm.set_speed(LD, depthCorrection)
-                pwm.set_speed(RD, depthCorrection)
-                pwm.set_speed(LF, headingCorrection + 30)
-                pwm.set_speed(RF, headingCorrection - 30)
-            end = time() - start
-            if end > 8.0 and end <= 24.0:
-                if depthPID.target == 0.9:
-                    depthPID.target = 0.3
-                    print 'Obstacle 1 done'
-            elif end > 25.0:
-                pwm.arm()
-                print 'Obstacle 2 done'
-                break
+            if not controller.connected():
+                depth = pressure.get_depth()
+                heading, roll, accy = imu.get_required(ref_heading=headingPID.target)
+                depthCorrection = -int(depthPID(feedback=depth))
+                headingCorrection = -int(headingPID(feedback=heading))
+                if depth > 0.1:
+                    pwm.set_speed(LD, depthCorrection)
+                    pwm.set_speed(RD, depthCorrection)
+                    pwm.set_speed(LF, headingCorrection + 30)
+                    pwm.set_speed(RF, headingCorrection - 30)
+                    print 'motor running'
+                end = time() - start
+                if end > 8.0 and end <= 24.0:
+                    if depthPID.target == 0.9:
+                        depthPID.target = 0.3
+                        print 'Obstacle 1 done'
+                elif end > 24.0:
+                    pwm.arm()
+                    print 'Obstacle 2 done'
+                    break
+            else:
+                pygame.event.get()
+                x = j.get_axis(2)
+                y = j.get_axis(5)
+                p = j.get_axis(0)
+                q = j.get_axis(1)
+                magd = sqrt(p*p + q*q)
+                mag = sqrt(x*x + y*y)
+                if y <= 0:
+                    if x >= 0:
+                        lf_speed =  int(round(mag,2)*30)
+                        rf_speed = - int(round(-y,2)*30)
+                    else:
+                        lf_speed =  int(round(-y,2)*30)
+                        rf_speed =  - int(round(mag,2)*30)
+                else:
+                    if x >= 0:
+                        lf_speed =  - int(round(mag,2)*30)
+                        rf_speed =  + int(round(y,2)*30)
+                    else:
+                        lf_speed =  - int(round(y,2)*30)
+                        rf_speed =  + int(round(mag,2)*30)
+                
+                if q >= 0:
+                    if p >= 0:
+                        ld_speed =  + int(round(magd,2)*30)
+                        rd_speed =  + int(round(-q,2)*30)
+                    else:
+                        ld_speed =  + int(round(-q,2)*30)
+                        rd_speed =  + int(round(magd,2)*30)
+                else:
+                    if p >= 0:
+                        ld_speed =  - int(round(magd,2)*30)
+                        rd_speed =  - int(round(q,2)*30)
+                    else:
+                        ld_speed =  - int(round(q,2)*30)
+                        rd_speed =  - int(round(magd,2)*30)
+                        print 'using some joystick axis'
+                pwm.set_speed(LD, ld_speed)
+                pwm.set_speed(RD, rd_speed)
+                pwm.set_speed(LF, lf_speed)
+                pwm.set_speed(RF, rf_speed)
         except KeyboardInterrupt:
             pwm.arm()
             print ("Motor stopped")
